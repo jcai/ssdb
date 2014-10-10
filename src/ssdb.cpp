@@ -1,10 +1,16 @@
 #include "ssdb.h"
 #include "slave.h"
+#include "leveldb/env.h"
 #include "leveldb/iterator.h"
 #include "leveldb/cache.h"
 #include "leveldb/filter_policy.h"
 
-SSDB::SSDB(){
+#include "t_kv.h"
+#include "t_hash.h"
+#include "t_zset.h"
+#include "t_queue.h"
+
+SSDB::SSDB(): sync_speed_(0){
 	db = NULL;
 	meta_db = NULL;
 	binlogs = NULL;
@@ -37,9 +43,23 @@ SSDB::~SSDB(){
 SSDB* SSDB::open(const Config &conf, const std::string &base_dir){
 	std::string main_db_path = base_dir + "/data";
 	std::string meta_db_path = base_dir + "/meta";
-	int cache_size = conf.get_num("leveldb.cache_size");
+	size_t cache_size = (size_t)conf.get_num("leveldb.cache_size");
+	int max_open_files = conf.get_num("leveldb.max_open_files");
 	int write_buffer_size = conf.get_num("leveldb.write_buffer_size");
 	int block_size = conf.get_num("leveldb.block_size");
+	int compaction_speed = conf.get_num("leveldb.compaction_speed");
+	std::string compression = conf.get_str("leveldb.compression");
+	std::string binlog_onoff = conf.get_str("replication.binlog");
+	int sync_speed = conf.get_num("replication.sync_speed");
+
+	strtolower(&compression);
+	if(compression != "yes"){
+		compression = "no";
+	}
+	strtolower(&binlog_onoff);
+	if(binlog_onoff != "no"){
+		binlog_onoff = "yes";
+	}
 
 	if(cache_size <= 0){
 		cache_size = 8;
@@ -50,20 +70,41 @@ SSDB* SSDB::open(const Config &conf, const std::string &base_dir){
 	if(block_size <= 0){
 		block_size = 4;
 	}
+	if(max_open_files <= 0){
+		max_open_files = cache_size / 1024 * 30;
+		if(max_open_files < 100){
+			max_open_files = 100;
+		}
+		if(max_open_files > 1000){
+			max_open_files = 1000;
+		}
+	}
 
-	log_info("main_db      : %s", main_db_path.c_str());
-	log_info("meta_db      : %s", meta_db_path.c_str());
-	log_info("cache_size   : %d MB", cache_size);
-	log_info("block_size   : %d KB", block_size);
-	log_info("write_buffer : %d MB", write_buffer_size);
+	log_info("main_db          : %s", main_db_path.c_str());
+	log_info("meta_db          : %s", meta_db_path.c_str());
+	log_info("cache_size       : %d MB", cache_size);
+	log_info("block_size       : %d KB", block_size);
+	log_info("write_buffer     : %d MB", write_buffer_size);
+	log_info("compaction_speed : %d MB/s", compaction_speed);
+	log_info("sync_speed       : %d MB/s", sync_speed);
+	log_info("compression      : %s", compression.c_str());
+	log_info("binlog           : %s", binlog_onoff.c_str());
+	log_info("max_open_files   : %d", max_open_files);
 
 	SSDB *ssdb = new SSDB();
 	//
+	ssdb->options.max_open_files = max_open_files;
 	ssdb->options.create_if_missing = true;
 	ssdb->options.filter_policy = leveldb::NewBloomFilterPolicy(10);
 	ssdb->options.block_cache = leveldb::NewLRUCache(cache_size * 1048576);
 	ssdb->options.block_size = block_size * 1024;
 	ssdb->options.write_buffer_size = write_buffer_size * 1024 * 1024;
+	ssdb->options.compaction_speed = compaction_speed;
+	if(compression == "yes"){
+		ssdb->options.compression = leveldb::kSnappyCompression;
+	}else{
+		ssdb->options.compression = leveldb::kNoCompression;
+	}
 
 	leveldb::Status status;
 	{
@@ -81,10 +122,14 @@ SSDB* SSDB::open(const Config &conf, const std::string &base_dir){
 		goto err;
 	}
 	ssdb->binlogs = new BinlogQueue(ssdb->db);
+	if(binlog_onoff == "no"){
+		ssdb->binlogs->no_log();
+	}
 
 	{ // slaves
 		const Config *repl_conf = conf.get("replication");
 		if(repl_conf != NULL){
+			ssdb->sync_speed_ = sync_speed;
 			std::vector<Config *> children = repl_conf->children;
 			for(std::vector<Config *>::iterator it = children.begin(); it != children.end(); it++){
 				Config *c = *it;
@@ -105,8 +150,13 @@ SSDB* SSDB::open(const Config &conf, const std::string &base_dir){
 					is_mirror = false;
 				}
 				
+				std::string id = c->get_str("id");
+				
 				log_info("slaveof: %s:%d, type: %s", ip.c_str(), port, type.c_str());
 				Slave *slave = new Slave(ssdb, ssdb->meta_db, ip.c_str(), port, is_mirror);
+				if(!id.empty()){
+					slave->set_id(id);
+				}
 				slave->start();
 				ssdb->slaves.push_back(slave);
 			}
@@ -121,7 +171,7 @@ err:
 	return NULL;
 }
 
-Iterator* SSDB::iterator(const std::string &start, const std::string &end, int limit) const{
+Iterator* SSDB::iterator(const std::string &start, const std::string &end, uint64_t limit) const{
 	leveldb::Iterator *it;
 	leveldb::ReadOptions iterate_options;
 	iterate_options.fill_cache = false;
@@ -133,7 +183,7 @@ Iterator* SSDB::iterator(const std::string &start, const std::string &end, int l
 	return new Iterator(it, end, limit);
 }
 
-Iterator* SSDB::rev_iterator(const std::string &start, const std::string &end, int limit) const{
+Iterator* SSDB::rev_iterator(const std::string &start, const std::string &end, uint64_t limit) const{
 	leveldb::Iterator *it;
 	leveldb::ReadOptions iterate_options;
 	iterate_options.fill_cache = false;
@@ -142,9 +192,6 @@ Iterator* SSDB::rev_iterator(const std::string &start, const std::string &end, i
 	if(!it->Valid()){
 		it->SeekToLast();
 	}else{
-		it->Prev();
-	}
-	if(it->Valid() && it->key() == start){
 		it->Prev();
 	}
 	return new Iterator(it, end, limit, Iterator::BACKWARD);
@@ -214,32 +261,143 @@ std::vector<std::string> SSDB::info() const{
 			info.push_back(val);
 		}
 	}
+
 	return info;
 }
 
-/*
-int SSDB::key_range(char data_type, std::string *start, std::string *end) const{
-	leveldb::ReadOptions iterate_options;
-	leveldb::Iterator *it = db->NewIterator(iterate_options);
+void SSDB::compact() const{
+	db->CompactRange(NULL, NULL);
+}
 
-	std::string start_str;
-	start_str.push_back(data_type);
+int SSDB::key_range(std::vector<std::string> *keys) const{
+	int ret = 0;
+	std::string kstart, kend;
+	std::string hstart, hend;
+	std::string zstart, zend;
+	std::string qstart, qend;
 	
-	it->Seek(key_str);
-	if(!it->Valid()){
-		// Iterator::prev requires Valid, so we seek to last
-		it->SeekToLast();
-	}
-	// UINT64_MAX is not used
-	if(it->Valid()){
-		it->Prev();
-	}
-	std::string ret;
-	if(it->Valid()){
-		leveldb::Slice key = it->key();
-		ret.assign(key.data(), key.size());
+	Iterator *it;
+	
+	it = this->iterator(encode_kv_key(""), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::KV){
+			std::string n;
+			if(decode_kv_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				kstart = n;
+			}
+		}
 	}
 	delete it;
+	
+	it = this->rev_iterator(encode_kv_key("\xff"), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::KV){
+			std::string n;
+			if(decode_kv_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				kend = n;
+			}
+		}
+	}
+	delete it;
+	
+	it = this->iterator(encode_hsize_key(""), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::HSIZE){
+			std::string n;
+			if(decode_hsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				hstart = n;
+			}
+		}
+	}
+	delete it;
+	
+	it = this->rev_iterator(encode_hsize_key("\xff"), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::HSIZE){
+			std::string n;
+			if(decode_hsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				hend = n;
+			}
+		}
+	}
+	delete it;
+	
+	it = this->iterator(encode_zsize_key(""), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::ZSIZE){
+			std::string n;
+			if(decode_hsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				zstart = n;
+			}
+		}
+	}
+	delete it;
+	
+	it = this->rev_iterator(encode_zsize_key("\xff"), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::ZSIZE){
+			std::string n;
+			if(decode_hsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				zend = n;
+			}
+		}
+	}
+	delete it;
+	
+	it = this->iterator(encode_qsize_key(""), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::QSIZE){
+			std::string n;
+			if(decode_qsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				qstart = n;
+			}
+		}
+	}
+	delete it;
+	
+	it = this->rev_iterator(encode_qsize_key("\xff"), "", 1);
+	if(it->next()){
+		Bytes ks = it->key();
+		if(ks.data()[0] == DataType::QSIZE){
+			std::string n;
+			if(decode_qsize_key(ks, &n) == -1){
+				ret = -1;
+			}else{
+				qend = n;
+			}
+		}
+	}
+	delete it;
+
+	keys->push_back(kstart);
+	keys->push_back(kend);
+	keys->push_back(hstart);
+	keys->push_back(hend);
+	keys->push_back(zstart);
+	keys->push_back(zend);
+	keys->push_back(qstart);
+	keys->push_back(qend);
+	
 	return ret;
 }
-*/

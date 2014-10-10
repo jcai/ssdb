@@ -9,9 +9,11 @@
 #include "ssdb.h"
 #include "backend_dump.h"
 #include "backend_sync.h"
+#include "ttl.h"
 
 #define PROC_OK			0
 #define PROC_ERROR		-1
+#define PROC_THREAD     1
 #define PROC_BACKEND	100
 
 typedef std::vector<Bytes> Request;
@@ -21,10 +23,11 @@ typedef std::vector<std::string> Response;
 class Server;
 typedef int (*proc_t)(Server *serv, Link *link, const Request &req, Response *resp);
 
-typedef struct{
+struct Command{
 	static const int FLAG_READ		= (1 << 0);
 	static const int FLAG_WRITE		= (1 << 1);
-	static const int FLAG_BACKEND	= (1 << 1);
+	static const int FLAG_BACKEND	= (1 << 2);
+	static const int FLAG_THREAD	= (1 << 3);
 
 	const char *name;
 	const char *sflags;
@@ -33,9 +36,9 @@ typedef struct{
 	uint64_t calls;
 	double time_wait;
 	double time_proc;
-}Command;
+};
 
-typedef struct _ProcJob{
+struct ProcJob{
 	int result;
 	Server *serv;
 	Link *link;
@@ -44,7 +47,7 @@ typedef struct _ProcJob{
 	double time_wait;
 	double time_proc;
 	
-	_ProcJob(){
+	ProcJob(){
 		result = 0;
 		serv = NULL;
 		link = NULL;
@@ -53,32 +56,40 @@ typedef struct _ProcJob{
 		time_wait = 0;
 		time_proc = 0;
 	}
-}ProcJob; // Request
+};
 
 
 class Server{
 	private:
-		static const int MAX_WRITERS = 1;
+		static const int READER_THREADS = 10;
+		static const int WRITER_THREADS = 1;
 	public:
+		int link_count;
 		SSDB *ssdb;
 		BackendDump *backend_dump;
 		BackendSync *backend_sync;
+		ExpirationHandler *expiration;
+		bool need_auth;
+		std::string password;
 
 		Server(SSDB *ssdb);
 		~Server();
 		void proc(ProcJob *job);
+		
+		// TODO: move into Response
+		void int_reply(Response *resp, int num);
+		void bool_reply(Response *resp, int ret, const char *errmsg=NULL);
 
 		// WARN: pipe latency is about 20 us, it is really slow!
-		// until I found a really fast selectable queue, this feature won't be enabled.
-		/*
-		class WriteProc : public WorkerPool<WriteProc, ProcJob>::Worker{
+		class ProcWorker : public WorkerPool<ProcWorker, ProcJob>::Worker{
 		public:
+			ProcWorker(const std::string &name);
+			~ProcWorker(){}
 			void init();
-			void destroy();
 			int proc(ProcJob *job);
 		};
-		WorkerPool<WriteProc, ProcJob> writer;
-		*/
+		WorkerPool<ProcWorker, ProcJob> *writer;
+		WorkerPool<ProcWorker, ProcJob> *reader;
 };
 
 template<class T>
@@ -91,9 +102,13 @@ static std::string serialize_req(T &req){
 			ret.append(buf);
 			break;
 		}
-		if(((req[0] == "get" || req[0] == "set") && i == 1) || req[i].size() < 30){
-			std::string h = hexmem(req[i].data(), req[i].size());
-			ret.append(h);
+		if(((req[0] == "get" || req[0] == "set") && i == 1) || req[i].size() < 50){
+			if(req[i].size() == 0){
+				ret.append("\"\"");
+			}else{
+				std::string h = hexmem(req[i].data(), req[i].size());
+				ret.append(h);
+			}
 		}else{
 			sprintf(buf, "[%d]", (int)req[i].size());
 			ret.append(buf);

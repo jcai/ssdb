@@ -1,3 +1,4 @@
+#include <limits.h>
 #include "t_zset.h"
 #include "leveldb/write_batch.h"
 
@@ -8,6 +9,9 @@ static int zset_one(SSDB *ssdb, const Bytes &name, const Bytes &key, const Bytes
 static int zdel_one(SSDB *ssdb, const Bytes &name, const Bytes &key, char log_type);
 static int incr_zsize(SSDB *ssdb, const Bytes &name, int64_t incr);
 
+/**
+ * @return -1: error, 0: item updated, 1: new item inserted
+ */
 int SSDB::zset(const Bytes &name, const Bytes &key, const Bytes &score, char log_type){
 	Transaction trans(binlogs);
 
@@ -78,64 +82,65 @@ int SSDB::zincr(const Bytes &name, const Bytes &key, int64_t by, std::string *ne
 	return ret;
 }
 
-int SSDB::multi_zset(const Bytes &name, const std::vector<Bytes> &kvs, int offset, char log_type){
-	Transaction trans(binlogs);
-
-	int ret = 0;
-	std::vector<Bytes>::const_iterator it;
-	it = kvs.begin() + offset;
-	for(; it != kvs.end(); it += 2){
-		const Bytes &key = *it;
-		const Bytes &score = *(it + 1);
-		int tmp = zset_one(this, name, key, score, log_type);
-		if(tmp == -1){
-			return -1;
-		}
-		ret += tmp;
-	}
-	if(ret >= 0){
-		if(ret > 0){
-			if(incr_zsize(this, name, ret) == -1){
-				return -1;
-			}
-		}
-		leveldb::Status s = binlogs->commit();
-		if(!s.ok()){
-			log_error("zdel error: %s", s.ToString().c_str());
-			return -1;
-		}
-	}
-	return ret;
-}
-
-int SSDB::multi_zdel(const Bytes &name, const std::vector<Bytes> &keys, int offset, char log_type){
-	Transaction trans(binlogs);
-
-	int ret = 0;
-	std::vector<Bytes>::const_iterator it;
-	it = keys.begin() + offset;
-	for(; it != keys.end(); it++){
-		const Bytes &key = *it;
-		int tmp = zdel_one(this, name, key, log_type);
-		if(tmp == -1){
-			return -1;
-		}
-		ret += tmp;
-	}
-	if(ret >= 0){
-		if(ret > 0){
-			if(incr_zsize(this, name, -ret) == -1){
-				return -1;
-			}
-		}
-		leveldb::Status s = binlogs->commit();
-		if(!s.ok()){
-			log_error("zdel error: %s", s.ToString().c_str());
-			return -1;
-		}
-	}
-	return ret;
-}
+// multi_zset work incorrect when same key occurs in kvs more than once
+//int SSDB::multi_zset(const Bytes &name, const std::vector<Bytes> &kvs, int offset, char log_type){
+//	Transaction trans(binlogs);
+//
+//	int ret = 0;
+//	std::vector<Bytes>::const_iterator it;
+//	it = kvs.begin() + offset;
+//	for(; it != kvs.end(); it += 2){
+//		const Bytes &key = *it;
+//		const Bytes &score = *(it + 1);
+//		int tmp = zset_one(this, name, key, score, log_type);
+//		if(tmp == -1){
+//			return -1;
+//		}
+//		ret += tmp;
+//	}
+//	if(ret >= 0){
+//		if(ret > 0){
+//			if(incr_zsize(this, name, ret) == -1){
+//				return -1;
+//			}
+//		}
+//		leveldb::Status s = binlogs->commit();
+//		if(!s.ok()){
+//			log_error("zdel error: %s", s.ToString().c_str());
+//			return -1;
+//		}
+//	}
+//	return ret;
+//}
+//
+//int SSDB::multi_zdel(const Bytes &name, const std::vector<Bytes> &keys, int offset, char log_type){
+//	Transaction trans(binlogs);
+//
+//	int ret = 0;
+//	std::vector<Bytes>::const_iterator it;
+//	it = keys.begin() + offset;
+//	for(; it != keys.end(); it++){
+//		const Bytes &key = *it;
+//		int tmp = zdel_one(this, name, key, log_type);
+//		if(tmp == -1){
+//			return -1;
+//		}
+//		ret += tmp;
+//	}
+//	if(ret >= 0){
+//		if(ret > 0){
+//			if(incr_zsize(this, name, -ret) == -1){
+//				return -1;
+//			}
+//		}
+//		leveldb::Status s = binlogs->commit();
+//		if(!s.ok()){
+//			log_error("zdel error: %s", s.ToString().c_str());
+//			return -1;
+//		}
+//	}
+//	return ret;
+//}
 
 int64_t SSDB::zsize(const Bytes &name) const{
 	std::string size_key = encode_zsize_key(name);
@@ -169,8 +174,110 @@ int SSDB::zget(const Bytes &name, const Bytes &key, std::string *score) const{
 	return 1;
 }
 
+static ZIterator* ziterator(
+	const SSDB *ssdb,
+	const Bytes &name, const Bytes &key_start,
+	const Bytes &score_start, const Bytes &score_end,
+	uint64_t limit, Iterator::Direction direction)
+{
+	if(direction == Iterator::FORWARD){
+		std::string start, end;
+		if(score_start.empty()){
+			start = encode_zscore_key(name, key_start, SSDB_SCORE_MIN);
+		}else{
+			start = encode_zscore_key(name, key_start, score_start);
+		}
+		if(score_end.empty()){
+			end = encode_zscore_key(name, "\xff", SSDB_SCORE_MAX);
+		}else{
+			end = encode_zscore_key(name, "\xff", score_end);
+		}
+		return new ZIterator(ssdb->iterator(start, end, limit), name);
+	}else{
+		std::string start, end;
+		if(score_start.empty()){
+			start = encode_zscore_key(name, key_start, SSDB_SCORE_MAX);
+		}else{
+			if(key_start.empty()){
+				start = encode_zscore_key(name, "\xff", score_start);
+			}else{
+				start = encode_zscore_key(name, key_start, score_start);
+			}
+		}
+		if(score_end.empty()){
+			end = encode_zscore_key(name, "", SSDB_SCORE_MIN);
+		}else{
+			end = encode_zscore_key(name, "", score_end);
+		}
+		return new ZIterator(ssdb->rev_iterator(start, end, limit), name);
+	}
+}
+
+int64_t SSDB::zrank(const Bytes &name, const Bytes &key) const{
+	ZIterator *it = ziterator(this, name, "", "", "", INT_MAX, Iterator::FORWARD);
+	uint64_t ret = 0;
+	while(true){
+		if(it->next() == false){
+			ret = -1;
+			break;
+		}
+		if(key == it->key){
+			break;
+		}
+		ret ++;
+	}
+	delete it;
+	return ret;
+}
+
+int64_t SSDB::zrrank(const Bytes &name, const Bytes &key) const{
+	ZIterator *it = ziterator(this, name, "", "", "", INT_MAX, Iterator::BACKWARD);
+	uint64_t ret = 0;
+	while(true){
+		if(it->next() == false){
+			ret = -1;
+			break;
+		}
+		if(key == it->key){
+			break;
+		}
+		ret ++;
+	}
+	delete it;
+	return ret;
+}
+
+ZIterator* SSDB::zrange(const Bytes &name, uint64_t offset, uint64_t limit){
+	if(offset + limit > limit){
+		limit = offset + limit;
+	}
+	ZIterator *it = ziterator(this, name, "", "", "", limit, Iterator::FORWARD);
+	it->skip(offset);
+	return it;
+}
+
+ZIterator* SSDB::zrrange(const Bytes &name, uint64_t offset, uint64_t limit){
+	if(offset + limit > limit){
+		limit = offset + limit;
+	}
+	ZIterator *it = ziterator(this, name, "", "", "", limit, Iterator::BACKWARD);
+	it->skip(offset);
+	return it;
+}
+
 ZIterator* SSDB::zscan(const Bytes &name, const Bytes &key,
-		const Bytes &score_start, const Bytes &score_end, int limit) const{
+		const Bytes &score_start, const Bytes &score_end, uint64_t limit) const
+{
+	std::string score;
+	// if only key is specified, load its value
+	if(!key.empty() && score_start.empty()){
+		this->zget(name, key, &score);
+	}else{
+		score = score_start.String();
+	}
+	return ziterator(this, name, key, score, score_end, limit, Iterator::FORWARD);
+
+	/*
 	std::string key_start, key_end;
 
 	if(score_start.empty()){
@@ -197,10 +304,22 @@ ZIterator* SSDB::zscan(const Bytes &name, const Bytes &key,
 	//dump(key_end.data(), key_end.size(), "zscan.end");
 
 	return new ZIterator(this->iterator(key_start, key_end, limit), name);
+	*/
 }
 
 ZIterator* SSDB::zrscan(const Bytes &name, const Bytes &key,
-		const Bytes &score_start, const Bytes &score_end, int limit) const{
+		const Bytes &score_start, const Bytes &score_end, uint64_t limit) const
+{
+	std::string score;
+	// if only key is specified, load its value
+	if(!key.empty() && score_start.empty()){
+		this->zget(name, key, &score);
+	}else{
+		score = score_start.String();
+	}
+	return ziterator(this, name, key, score, score_end, limit, Iterator::BACKWARD);
+
+	/*
 	std::string key_start, key_end;
 
 	if(score_start.empty()){
@@ -227,17 +346,10 @@ ZIterator* SSDB::zrscan(const Bytes &name, const Bytes &key,
 	//dump(key_end.data(), key_end.size(), "zscan.end");
 
 	return new ZIterator(this->rev_iterator(key_start, key_end, limit), name);
+	*/
 }
 
-int SSDB::zlist(const Bytes &name_s, const Bytes &name_e, int limit,
-		std::vector<std::string> *list) const{
-	std::string start;
-	std::string end;
-	start = encode_zsize_key(name_s);
-	if(!end.empty()){
-		end = encode_zsize_key(name_e);
-	}
-	Iterator *it = this->iterator(start, end, limit);
+static void get_znames(Iterator *it, std::vector<std::string> *list){
 	while(it->next()){
 		Bytes ks = it->key();
 		//dump(ks.data(), ks.size());
@@ -250,6 +362,39 @@ int SSDB::zlist(const Bytes &name_s, const Bytes &name_e, int limit,
 		}
 		list->push_back(n);
 	}
+}
+
+int SSDB::zlist(const Bytes &name_s, const Bytes &name_e, uint64_t limit,
+		std::vector<std::string> *list) const{
+	std::string start;
+	std::string end;
+	
+	start = encode_zsize_key(name_s);
+	if(!name_e.empty()){
+		end = encode_zsize_key(name_e);
+	}
+	
+	Iterator *it = this->iterator(start, end, limit);
+	get_znames(it, list);
+	delete it;
+	return 0;
+}
+
+int SSDB::zrlist(const Bytes &name_s, const Bytes &name_e, uint64_t limit,
+		std::vector<std::string> *list) const{
+	std::string start;
+	std::string end;
+
+	start = encode_zsize_key(name_s);
+	if(name_s.empty()){
+		start.append(1, 255);
+	}
+	if(!name_e.empty()){
+		end = encode_zsize_key(name_e);
+	}
+
+	Iterator *it = this->rev_iterator(start, end, limit);
+	get_znames(it, list);
 	delete it;
 	return 0;
 }
@@ -257,12 +402,17 @@ int SSDB::zlist(const Bytes &name_s, const Bytes &name_e, int limit,
 static std::string filter_score(const Bytes &score){
 	int64_t s = score.Int64();
 	char buf[32];
-	snprintf(buf, sizeof(buf), "%lld", s);
+	snprintf(buf, sizeof(buf), "%" PRId64 "", s);
 	return std::string(buf);
 }
 
 // returns the number of newly added items
 static int zset_one(SSDB *ssdb, const Bytes &name, const Bytes &key, const Bytes &score, char log_type){
+	if(name.empty() || key.empty()){
+		log_error("empty name or key!");
+		return 0;
+		//return -1;
+	}
 	if(name.size() > SSDB_KEY_LEN_MAX ){
 		log_error("name too long!");
 		return -1;
@@ -290,7 +440,7 @@ static int zset_one(SSDB *ssdb, const Bytes &name, const Bytes &key, const Bytes
 		// update zset
 		k0 = encode_zset_key(name, key);
 		ssdb->binlogs->Put(k0, new_score);
-		ssdb->binlogs->add(log_type, BinlogCommand::ZSET, k0);
+		ssdb->binlogs->add_log(log_type, BinlogCommand::ZSET, k0);
 
 		return found? 0 : 1;
 	}
@@ -320,7 +470,7 @@ static int zdel_one(SSDB *ssdb, const Bytes &name, const Bytes &key, char log_ty
 	// delete zset
 	k0 = encode_zset_key(name, key);
 	ssdb->binlogs->Delete(k0);
-	ssdb->binlogs->add(log_type, BinlogCommand::ZDEL, k0);
+	ssdb->binlogs->add_log(log_type, BinlogCommand::ZDEL, k0);
 
 	return 1;
 }

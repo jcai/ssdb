@@ -1,19 +1,10 @@
 #include "version.h"
-
 #include "util/log.h"
 #include "util/strings.h"
 #include "serv.h"
 #include "t_kv.h"
 #include "t_hash.h"
 #include "t_zset.h"
-
-#define GCC_VERSION (__GNUC__ * 100 + __GNUC_MINOR__)
-#if GCC_VERSION >= 403
-	#include <tr1/unordered_map>
-#else
-	#include <ext/hash_map>
-#endif
-
 
 struct BytesEqual{
 	bool operator()(const Bytes &s1, const Bytes &s2) const {
@@ -30,18 +21,37 @@ struct BytesHash{
 	}
 };
 
+
+#define GCC_VERSION (__GNUC__ * 100 + __GNUC_MINOR__)
 #if GCC_VERSION >= 403
-		typedef std::tr1::unordered_map<Bytes, Command *, BytesHash, BytesEqual> proc_map_t;
+	#include <tr1/unordered_map>
+	typedef std::tr1::unordered_map<Bytes, Command *, BytesHash, BytesEqual> proc_map_t;
 #else
+	#ifdef NEW_MAC
+		#include <unordered_map>
+		typedef std::unordered_map<Bytes, Command *, BytesHash, BytesEqual> proc_map_t;
+	#else
+		#include <ext/hash_map>
 		typedef __gnu_cxx::hash_map<Bytes, Command *, BytesHash, BytesEqual> proc_map_t;
+	#endif
 #endif
 
-static proc_map_t proc_map;
 
+static proc_map_t proc_map;
 
 #define DEF_PROC(f) static int proc_##f(Server *serv, Link *link, const Request &req, Response *resp)
 	DEF_PROC(get);
 	DEF_PROC(set);
+	DEF_PROC(setx);
+	DEF_PROC(setnx);
+	DEF_PROC(getset);
+	DEF_PROC(getbit);
+	DEF_PROC(setbit);
+	DEF_PROC(countbit);
+	DEF_PROC(substr);
+	DEF_PROC(getrange);
+	DEF_PROC(strlen);
+	DEF_PROC(redis_bitcount);
 	DEF_PROC(del);
 	DEF_PROC(incr);
 	DEF_PROC(decr);
@@ -60,10 +70,14 @@ static proc_map_t proc_map;
 	DEF_PROC(hdel);
 	DEF_PROC(hincr);
 	DEF_PROC(hdecr);
+	DEF_PROC(hclear);
+	DEF_PROC(hgetall);
 	DEF_PROC(hscan);
 	DEF_PROC(hrscan);
 	DEF_PROC(hkeys);
+	DEF_PROC(hvals);
 	DEF_PROC(hlist);
+	DEF_PROC(hrlist);
 	DEF_PROC(hexists);
 	DEF_PROC(multi_hexists);
 	DEF_PROC(multi_hsize);
@@ -71,82 +85,171 @@ static proc_map_t proc_map;
 	DEF_PROC(multi_hset);
 	DEF_PROC(multi_hdel);
 
+	DEF_PROC(zrank);
+	DEF_PROC(zrrank);
+	DEF_PROC(zrange);
+	DEF_PROC(zrrange);
 	DEF_PROC(zsize);
 	DEF_PROC(zget);
 	DEF_PROC(zset);
 	DEF_PROC(zdel);
 	DEF_PROC(zincr);
 	DEF_PROC(zdecr);
+	DEF_PROC(zclear);
 	DEF_PROC(zscan);
 	DEF_PROC(zrscan);
 	DEF_PROC(zkeys);
 	DEF_PROC(zlist);
+	DEF_PROC(zrlist);
+	DEF_PROC(zcount);
+	DEF_PROC(zsum);
+	DEF_PROC(zavg);
 	DEF_PROC(zexists);
+	DEF_PROC(zremrangebyrank);
+	DEF_PROC(zremrangebyscore);
 	DEF_PROC(multi_zexists);
 	DEF_PROC(multi_zsize);
 	DEF_PROC(multi_zget);
 	DEF_PROC(multi_zset);
 	DEF_PROC(multi_zdel);
+	
+	DEF_PROC(qsize);
+	DEF_PROC(qfront);
+	DEF_PROC(qback);
+	DEF_PROC(qpush);
+	DEF_PROC(qpush_front);
+	DEF_PROC(qpush_back);
+	DEF_PROC(qpop);
+	DEF_PROC(qpop_front);
+	DEF_PROC(qpop_back);
+	DEF_PROC(qfix);
+	DEF_PROC(qclear);
+	DEF_PROC(qlist);
+	DEF_PROC(qrlist);
+	DEF_PROC(qslice);
+	DEF_PROC(qrange);
+	DEF_PROC(qget);
 
-	DEF_PROC(info);
 	DEF_PROC(dump);
 	DEF_PROC(sync140);
+	DEF_PROC(info);
+	DEF_PROC(compact);
+	DEF_PROC(key_range);
+	DEF_PROC(ttl);
+	DEF_PROC(expire);
+	DEF_PROC(clear_binlog);
+	DEF_PROC(ping);
+	DEF_PROC(auth);
 #undef DEF_PROC
 
 
 #define PROC(c, f) {#c, f, 0, proc_##c, 0, 0, 0}
 static Command commands[] = {
 	PROC(get, "r"),
-	PROC(set, "w"),
-	PROC(del, "w"),
-	PROC(incr, "w"),
-	PROC(decr, "w"),
-	PROC(scan, "r"),
-	PROC(rscan, "r"),
-	PROC(keys, "r"),
+	PROC(set, "wt"),
+	PROC(setx, "wt"),
+	PROC(setnx, "wt"),
+	PROC(getset, "wt"),
+	PROC(getbit, "r"),
+	PROC(setbit, "wt"),
+	PROC(countbit, "r"),
+	PROC(substr, "r"),
+	PROC(getrange, "r"),
+	PROC(strlen, "r"),
+	PROC(redis_bitcount, "r"),
+	PROC(del, "wt"),
+	PROC(incr, "wt"),
+	PROC(decr, "wt"),
+	PROC(scan, "rt"),
+	PROC(rscan, "rt"),
+	PROC(keys, "rt"),
 	PROC(exists, "r"),
 	PROC(multi_exists, "r"),
-	PROC(multi_get, "r"),
-	PROC(multi_set, "w"),
-	PROC(multi_del, "w"),
+	PROC(multi_get, "rt"),
+	PROC(multi_set, "wt"),
+	PROC(multi_del, "wt"),
 
 	PROC(hsize, "r"),
 	PROC(hget, "r"),
-	PROC(hset, "w"),
-	PROC(hdel, "w"),
-	PROC(hincr, "w"),
-	PROC(hdecr, "w"),
-	PROC(hscan, "r"),
-	PROC(hrscan, "r"),
-	PROC(hkeys, "r"),
-	PROC(hlist, "r"),
+	PROC(hset, "wt"),
+	PROC(hdel, "wt"),
+	PROC(hincr, "wt"),
+	PROC(hdecr, "wt"),
+	PROC(hclear, "wt"),
+	PROC(hgetall, "rt"),
+	PROC(hscan, "rt"),
+	PROC(hrscan, "rt"),
+	PROC(hkeys, "rt"),
+	PROC(hvals, "rt"),
+	PROC(hlist, "rt"),
+	PROC(hrlist, "rt"),
 	PROC(hexists, "r"),
 	PROC(multi_hexists, "r"),
 	PROC(multi_hsize, "r"),
-	PROC(multi_hget, "r"),
-	PROC(multi_hset, "w"),
-	PROC(multi_hdel, "w"),
+	PROC(multi_hget, "rt"),
+	PROC(multi_hset, "wt"),
+	PROC(multi_hdel, "wt"),
 
+	// because zrank may be extremly slow, execute in a seperate thread
+	PROC(zrank, "rt"),
+	PROC(zrrank, "rt"),
+	PROC(zrange, "rt"),
+	PROC(zrrange, "rt"),
 	PROC(zsize, "r"),
-	PROC(zget, "r"),
-	PROC(zset, "w"),
-	PROC(zdel, "w"),
-	PROC(zincr, "w"),
-	PROC(zdecr, "w"),
-	PROC(zscan, "r"),
-	PROC(zrscan, "r"),
-	PROC(zkeys, "r"),
-	PROC(zlist, "r"),
+	PROC(zget, "rt"),
+	PROC(zset, "wt"),
+	PROC(zdel, "wt"),
+	PROC(zincr, "wt"),
+	PROC(zdecr, "wt"),
+	PROC(zclear, "wt"),
+	PROC(zscan, "rt"),
+	PROC(zrscan, "rt"),
+	PROC(zkeys, "rt"),
+	PROC(zlist, "rt"),
+	PROC(zrlist, "rt"),
+	PROC(zcount, "rt"),
+	PROC(zsum, "rt"),
+	PROC(zavg, "rt"),
+	PROC(zremrangebyrank, "wt"),
+	PROC(zremrangebyscore, "wt"),
 	PROC(zexists, "r"),
 	PROC(multi_zexists, "r"),
 	PROC(multi_zsize, "r"),
-	PROC(multi_zget, "r"),
-	PROC(multi_zset, "w"),
-	PROC(multi_zdel, "w"),
+	PROC(multi_zget, "rt"),
+	PROC(multi_zset, "wt"),
+	PROC(multi_zdel, "wt"),
 
-	PROC(info, "r"),
+	PROC(qsize, "r"),
+	PROC(qfront, "r"),
+	PROC(qback, "r"),
+	PROC(qpush, "wt"),
+	PROC(qpush_front, "wt"),
+	PROC(qpush_back, "wt"),
+	PROC(qpop, "wt"),
+	PROC(qpop_front, "wt"),
+	PROC(qpop_back, "wt"),
+	PROC(qfix, "wt"),
+	PROC(qclear, "wt"),
+	PROC(qlist, "rt"),
+	PROC(qrlist, "rt"),
+	PROC(qslice, "rt"),
+	PROC(qrange, "rt"),
+	PROC(qget, "r"),
+
+	PROC(clear_binlog, "wt"),
+
 	PROC(dump, "b"),
 	PROC(sync140, "b"),
+	PROC(info, "r"),
+	// doing compaction in a reader thread, because we have only one
+	// writer thread(for performance reason), we don't want to block writes
+	PROC(compact, "rt"),
+	PROC(key_range, "r"),
+
+	PROC(ttl, "r"),
+	PROC(expire, "wt"),
+	PROC(ping, "r"),
+	PROC(auth, "r"),
 
 	{NULL, NULL, 0, NULL}
 };
@@ -154,6 +257,8 @@ static Command commands[] = {
 
 Server::Server(SSDB *ssdb){
 	this->ssdb = ssdb;
+	this->link_count = 0;
+	this->need_auth = false;
 	backend_dump = new BackendDump(ssdb);
 	backend_sync = new BackendSync(ssdb);
 
@@ -169,19 +274,36 @@ Server::Server(SSDB *ssdb){
 				case 'b':
 					cmd->flags |= Command::FLAG_BACKEND;
 					break;
+				case 't':
+					cmd->flags |= Command::FLAG_THREAD;
+					break;
 			}
 		}
 		proc_map[cmd->name] = cmd;
 	}
+	// for k-v data, list === keys
+	proc_map["list"] = proc_map["keys"];
+
+	expiration = new ExpirationHandler(ssdb);
 	
-	//writer.start(MAX_WRITERS);
+	writer = new WorkerPool<ProcWorker, ProcJob>("writer");
+	writer->start(WRITER_THREADS);
+	reader = new WorkerPool<ProcWorker, ProcJob>("reader");
+	reader->start(READER_THREADS);
 }
 
 Server::~Server(){
 	delete backend_dump;
 	delete backend_sync;
-	//writer.stop();
-	log_debug("CommandProc finalized");
+	
+	delete expiration;
+	
+	writer->stop();
+	delete writer;
+	reader->stop();
+	delete reader;
+
+	log_debug("Server finalized");
 }
 
 void Server::proc(ProcJob *job){
@@ -189,7 +311,7 @@ void Server::proc(ProcJob *job){
 	job->result = PROC_OK;
 	job->stime = millitime();
 	const Request *req = job->link->last_recv();
-	
+
 	Response resp;
 	proc_map_t::iterator it = proc_map.find(req->at(0));
 	if(it == proc_map.end()){
@@ -197,42 +319,78 @@ void Server::proc(ProcJob *job){
 		resp.push_back("Unknown Command: " + req->at(0).String());
 	}else{
 		Command *cmd = it->second;
-		job->cmd = cmd;
-		/*
-		if(cmd->flags & Command::FLAG_WRITE){
-			job->result = PROC_BACKEND;
-			writer.push(*job);
-			return; /////
+		if(this->need_auth && job->link->auth == false && strcmp(cmd->name, "auth") != 0){
+			resp.push_back("noauth");
+			resp.push_back("authentication required");
+		}else{
+			job->cmd = cmd;
+			if(cmd->flags & Command::FLAG_THREAD){
+				if(cmd->flags & Command::FLAG_WRITE){
+					job->result = PROC_THREAD;
+					writer->push(*job);
+					return; /////
+				}else if(cmd->flags & Command::FLAG_READ){
+					job->result = PROC_THREAD;
+					reader->push(*job);
+					return; /////
+				}else{
+					log_error("bad command config: %s", cmd->name);
+				}
+			}
+
+			proc_t p = cmd->proc;
+			job->time_wait = 1000 *(millitime() - job->stime);
+			job->result = (*p)(this, job->link, *req, &resp);
+			job->time_proc = 1000 *(millitime() - job->stime);
 		}
-		*/
-		proc_t p = cmd->proc;
-		job->time_wait = 1000 *(millitime() - job->stime);
-		job->result = (*p)(this, job->link, *req, &resp);
-		job->time_proc = 1000 *(millitime() - job->stime);
+	}
+	if(job->result == PROC_BACKEND){
+		return;
 	}
 	
 	if(job->link->send(resp) == -1){
 		job->result = PROC_ERROR;
 	}else{
-		log_debug("w:%.3f,p:%.3f, req: %s, resp: %s",
-			job->time_wait, job->time_proc,
-			serialize_req(*req).c_str(),
-			serialize_req(resp).c_str());
+		if(log_level() >= Logger::LEVEL_DEBUG){
+			log_debug("w:%.3f,p:%.3f, req: %s, resp: %s",
+				job->time_wait, job->time_proc,
+				serialize_req(*req).c_str(),
+				serialize_req(resp).c_str());
+		}
 	}
 }
 
-
-
-/*
-void Server::WriteProc::init(){
-	log_debug("%d init", this->id);
+void Server::bool_reply(Response *resp, int ret, const char *errmsg){
+	if(ret == -1){
+		resp->push_back("error");
+		if(errmsg){
+			resp->push_back(errmsg);
+		}
+	}else if(ret == 0){
+		resp->push_back("ok");
+		resp->push_back("0");
+	}else{
+		resp->push_back("ok");
+		resp->push_back("1");
+	}
 }
 
-void Server::WriteProc::destroy(){
-	log_debug("%d destroy", this->id);
+void Server::int_reply(Response *resp, int num){
+	resp->push_back("ok");
+	char buf[20];
+	sprintf(buf, "%d", num);
+	resp->push_back(buf);
 }
 
-int Server::WriteProc::proc(ProcJob *job){
+Server::ProcWorker::ProcWorker(const std::string &name){
+	this->name = name;
+}
+
+void Server::ProcWorker::init(){
+	log_debug("%s %d init", this->name.c_str(), this->id);
+}
+
+int Server::ProcWorker::proc(ProcJob *job){
 	const Request *req = job->link->last_recv();
 	Response resp;
 	
@@ -246,15 +404,20 @@ int Server::WriteProc::proc(ProcJob *job){
 	if(job->link->send(resp) == -1){
 		job->result = PROC_ERROR;
 	}else{
-		log_debug("wait: %.3f, proc: %.3f, req: %s, resp: %s",
+		log_debug("w:%.3f,p:%.3f, req: %s, resp: %s",
 			job->time_wait, job->time_proc,
 			serialize_req(*req).c_str(),
 			serialize_req(resp).c_str());
 	}
 	return 0;
 }
-*/
 
+
+static int proc_clear_binlog(Server *serv, Link *link, const Request &req, Response *resp){
+	serv->ssdb->binlogs->flush();
+	resp->push_back("ok");
+	return 0;
+}
 
 static int proc_dump(Server *serv, Link *link, const Request &req, Response *resp){
 	serv->backend_dump->proc(link);
@@ -271,25 +434,159 @@ static int proc_info(Server *serv, Link *link, const Request &req, Response *res
 	resp->push_back("ssdb-server");
 	resp->push_back("version");
 	resp->push_back(SSDB_VERSION);
-	
-	for(Command *cmd=commands; cmd->name; cmd++){
-		char buf[128];
-		snprintf(buf, sizeof(buf), "cmd.%s", cmd->name);
+	{
+		resp->push_back("links");
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%d", serv->link_count);
 		resp->push_back(buf);
-		snprintf(buf, sizeof(buf), "calls: %llu\ttime_wait: %.0f\ttime_proc: %.0f",
-			cmd->calls, cmd->time_wait, cmd->time_proc);
+	}
+	{
+		uint64_t calls = 0;
+		for(Command *cmd=commands; cmd->name; cmd++){
+			calls += cmd->calls;
+		}
+		resp->push_back("total_calls");
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%" PRIu64, calls);
 		resp->push_back(buf);
 	}
 
-	std::vector<std::string> tmp = serv->ssdb->info();
+	if(req.size() > 1 && req[1] == "cmd"){
+		for(Command *cmd=commands; cmd->name; cmd++){
+			char buf[128];
+			snprintf(buf, sizeof(buf), "cmd.%s", cmd->name);
+			resp->push_back(buf);
+			snprintf(buf, sizeof(buf), "calls: %" PRIu64 "\ttime_wait: %.0f\ttime_proc: %.0f",
+				cmd->calls, cmd->time_wait, cmd->time_proc);
+			resp->push_back(buf);
+		}
+	}
+
+	if(req.size() == 1 || req[1] == "range"){
+		std::vector<std::string> tmp;
+		int ret = serv->ssdb->key_range(&tmp);
+		if(ret == 0){
+			char buf[512];
+			
+			resp->push_back("key_range.kv");
+			snprintf(buf, sizeof(buf), "\"%s\" - \"%s\"",
+				hexmem(tmp[0].data(), tmp[0].size()).c_str(),
+				hexmem(tmp[1].data(), tmp[1].size()).c_str()
+				);
+			resp->push_back(buf);
+			
+			resp->push_back("key_range.hash");
+			snprintf(buf, sizeof(buf), "\"%s\" - \"%s\"",
+				hexmem(tmp[2].data(), tmp[2].size()).c_str(),
+				hexmem(tmp[3].data(), tmp[3].size()).c_str()
+				);
+			resp->push_back(buf);
+			
+			resp->push_back("key_range.zset");
+			snprintf(buf, sizeof(buf), "\"%s\" - \"%s\"",
+				hexmem(tmp[4].data(), tmp[4].size()).c_str(),
+				hexmem(tmp[5].data(), tmp[5].size()).c_str()
+				);
+			resp->push_back(buf);
+			
+			resp->push_back("key_range.list");
+			snprintf(buf, sizeof(buf), "\"%s\" - \"%s\"",
+				hexmem(tmp[6].data(), tmp[6].size()).c_str(),
+				hexmem(tmp[7].data(), tmp[7].size()).c_str()
+				);
+			resp->push_back(buf);
+		}
+	}
+
+	if(req.size() == 1 || req[1] == "leveldb"){
+		std::vector<std::string> tmp = serv->ssdb->info();
+		for(int i=0; i<(int)tmp.size(); i++){
+			std::string block = tmp[i];
+			resp->push_back(block);
+		}
+	}
+	
+	return 0;
+}
+
+static int proc_compact(Server *serv, Link *link, const Request &req, Response *resp){
+	serv->ssdb->compact();
+	resp->push_back("ok");
+	return 0;
+}
+
+static int proc_key_range(Server *serv, Link *link, const Request &req, Response *resp){
+	std::vector<std::string> tmp;
+	int ret = serv->ssdb->key_range(&tmp);
+	if(ret == -1){
+		resp->push_back("error");
+		return -1;
+	}
+	
+	resp->push_back("ok");
 	for(int i=0; i<(int)tmp.size(); i++){
 		std::string block = tmp[i];
 		resp->push_back(block);
 	}
+	
 	return 0;
 }
 
+static int proc_ttl(Server *serv, Link *link, const Request &req, Response *resp){
+	if(req.size() != 2){
+		resp->push_back("client_error");
+	}else{
+		int64_t ttl = serv->expiration->get_ttl(req[1]);
+		resp->push_back("ok");
+		resp->push_back(int64_to_str(ttl));
+	}
+	return 0;
+}
+
+static int proc_expire(Server *serv, Link *link, const Request &req, Response *resp){
+	Locking l(&serv->expiration->mutex);
+	if(req.size() != 3){
+		resp->push_back("client_error");
+	}else{
+		std::string val;
+		int ret = serv->ssdb->get(req[1], &val);
+		if(ret == 1){
+			ret = serv->expiration->set_ttl(req[1], req[2].Int());
+			if(ret != -1){
+				resp->push_back("ok");
+				resp->push_back("1");
+				return 0;
+			}
+		}
+		resp->push_back("ok");
+		resp->push_back("0");
+	}
+	return 0;
+}
+
+static int proc_ping(Server *serv, Link *link, const Request &req, Response *resp){
+	resp->push_back("ok");
+	return 0;
+}
+
+static int proc_auth(Server *serv, Link *link, const Request &req, Response *resp){
+	Locking l(&serv->expiration->mutex);
+	if(req.size() != 2){
+		resp->push_back("client_error");
+	}else{
+		if(!serv->need_auth || req[1] == serv->password){
+			link->auth = true;
+			resp->push_back("ok");
+			resp->push_back("1");
+		}else{
+			resp->push_back("error");
+			resp->push_back("invalid password");
+		}
+	}
+	return 0;
+}
 
 #include "proc_kv.cpp"
 #include "proc_hash.cpp"
 #include "proc_zset.cpp"
+#include "proc_queue.cpp"

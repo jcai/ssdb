@@ -8,7 +8,7 @@
 #include "leveldb/slice.h"
 #include "leveldb/status.h"
 #include "leveldb/write_batch.h"
-#include "util/lock.h"
+#include "util/thread.h"
 #include "util/bytes.h"
 
 
@@ -43,7 +43,7 @@ class Binlog{
 class BinlogQueue{
 	private:
 #ifdef NDEBUG
-	static const int LOG_QUEUE_SIZE  = 1 * 1000 * 1000;
+	static const int LOG_QUEUE_SIZE  = 10 * 1000 * 1000;
 #else
 	static const int LOG_QUEUE_SIZE  = 10000;
 #endif
@@ -61,12 +61,12 @@ class BinlogQueue{
 		int del_range(uint64_t start, uint64_t end);
 		
 		void merge();
+		bool no_log_;
 	public:
 		Mutex mutex;
 
 		BinlogQueue(leveldb::DB *db);
 		~BinlogQueue();
-		
 		void begin();
 		void rollback();
 		leveldb::Status commit();
@@ -74,11 +74,14 @@ class BinlogQueue{
 		void Put(const leveldb::Slice& key, const leveldb::Slice& value);
 		// leveldb delete
 		void Delete(const leveldb::Slice& key);
-		void add(char type, char cmd, const leveldb::Slice &key);
-		void add(char type, char cmd, const std::string &key);
+		void no_log();
+		void add_log(char type, char cmd, const leveldb::Slice &key);
+		void add_log(char type, char cmd, const std::string &key);
 		
 		int get(uint64_t seq, Binlog *log) const;
 		int update(uint64_t seq, char type, char cmd, const std::string &key);
+		
+		void flush();
 		
 		/** @returns
 		 1 : log.seq greater than or equal to seq
@@ -100,6 +103,7 @@ public:
 	}
 	
 	~Transaction(){
+		// it is safe to call rollback after commit
 		logs->rollback();
 		logs->mutex.unlock();
 	}

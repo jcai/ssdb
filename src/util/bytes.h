@@ -17,6 +17,11 @@ class Bytes{
 			size_ = 0;
 		}
 
+		Bytes(void *data, int size){
+			data_ = (char *)data;
+			size_ = size;
+		}
+
 		Bytes(const char *data, int size){
 			data_ = data;
 			size_ = size;
@@ -75,7 +80,7 @@ class Bytes{
 			return str_to_int64(data_, size_);
 		}
 
-		int64_t Uint64() const{
+		uint64_t Uint64() const{
 			return str_to_uint64(data_, size_);
 		}
 
@@ -207,6 +212,17 @@ public:
 		p += sizeof(int64_t);
 		size -= sizeof(int64_t);
 		return sizeof(int64_t);
+	}
+	int read_uint64(uint64_t *ret){
+		if(size < sizeof(uint64_t)){
+			return -1;
+		}
+		if(ret){
+			*ret = *(uint64_t *)p;
+		}
+		p += sizeof(uint64_t);
+		size -= sizeof(uint64_t);
+		return sizeof(uint64_t);
 	}
 	int read_data(std::string *ret){
 		int n = size;

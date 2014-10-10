@@ -4,19 +4,25 @@
 #include <vector>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 
 #include "util/bytes.h"
+
+#include "link_redis.h"
 
 class Link{
 	private:
 		int sock;
 		bool noblock_;
+		bool error_;
 		std::vector<Bytes> recv_data;
 
+		RedisLink *redis;
 	public:
 		char remote_ip[INET_ADDRSTRLEN];
 		int remote_port;
+		bool auth;
 
 		static int min_recv_buf;
 		static int min_send_buf;
@@ -39,6 +45,12 @@ class Link{
 		int fd() const{
 			return sock;
 		}
+		bool error() const{
+			return error_;
+		}
+		void mark_error(){
+			error_ = true;
+		}
 
 		static Link* connect(const char *ip, int port);
 		static Link* listen(const char *ip, int port);
@@ -48,7 +60,7 @@ class Link{
 		int read();
 		int write();
 		// flush buffered data to network
-		// REQURES: nonblock
+		// REQUIRES: nonblock
 		int flush();
 
 		/**
@@ -58,6 +70,8 @@ class Link{
 		 * vector<Bytes>: recv ready
 		 */
 		const std::vector<Bytes>* recv();
+		// wait until a response received.
+		const std::vector<Bytes>* response();
 
 		// need to call flush to ensure all data has flush into network
 		int send(const std::vector<std::string> &packet);
@@ -71,6 +85,17 @@ class Link{
 		const std::vector<Bytes>* last_recv(){
 			return &recv_data;
 		}
+		
+		/** these methods will send a request to the server, and wait until a response received.
+		 * @return
+		 * NULL: error
+		 * vector<Bytes>: response ready
+		 */
+		const std::vector<Bytes>* request(const Bytes &s1);
+		const std::vector<Bytes>* request(const Bytes &s1, const Bytes &s2);
+		const std::vector<Bytes>* request(const Bytes &s1, const Bytes &s2, const Bytes &s3);
+		const std::vector<Bytes>* request(const Bytes &s1, const Bytes &s2, const Bytes &s3, const Bytes &s4);
+		const std::vector<Bytes>* request(const Bytes &s1, const Bytes &s2, const Bytes &s3, const Bytes &s4, const Bytes &s5);
 };
 
 #endif
